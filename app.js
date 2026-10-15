@@ -197,7 +197,36 @@ $$('.nav-btn').forEach(b=>b.addEventListener('click',()=>selectPage(b.dataset.pa
 $$('[data-view]').forEach(b=>b.addEventListener('click',()=>{state.view=b.dataset.view;state.timeline=false;renderCalendar()}));
 $('#toggleSidebar').addEventListener('click',()=>$('#sidebar').classList.toggle('collapsed'));
 $('#prevPeriod').addEventListener('click',()=>movePeriod(-1));$('#nextPeriod').addEventListener('click',()=>movePeriod(1));
-$('#goToday').addEventListener('click',()=>{state.date=startOfDay(new Date());selectPage('calendar')});
+// "Hoje" preserva a visualização e desloca a rolagem até a data atual.
+// Na visão anual, renderCalendar() reinicia a rolagem; por isso navegamos
+// após renderizar, em vez de apenas alterar state.date.
+function scrollToTodayInYear(){
+ if(state.view!=='year'||state.page!=='calendar')return;
+ const scroll=$('#calendarScroll');
+ const targetDate=iso(state.date);
+ const target=$$('.year-month .day-card').find(card=>card.dataset.date===targetDate);
+ if(!scroll||!target)return;
+ const section=target.closest('.year-month');
+ const weekdayHeader=$('.year-area .weekdays');
+ const headerHeight=weekdayHeader?.getBoundingClientRect().height||0;
+ const scrollRect=scroll.getBoundingClientRect();
+ const sectionRect=section.getBoundingClientRect();
+ // Mostrar primeiro o título do mês e, na sequência, garantir que hoje esteja visível.
+ scroll.scrollTop+=sectionRect.top-scrollRect.top-headerHeight-8;
+ const dayRect=target.getBoundingClientRect();
+ const visibleTop=scrollRect.top+headerHeight+8;
+ const visibleBottom=scrollRect.bottom-12;
+ if(dayRect.bottom>visibleBottom)scroll.scrollTop+=dayRect.bottom-visibleBottom;
+ else if(dayRect.top<visibleTop)scroll.scrollTop+=dayRect.top-visibleTop;
+}
+function goToToday(){
+ const today=startOfDay(new Date());
+ state.date=today;
+ $('#todayLabel').textContent=today.toLocaleDateString('pt-BR',{day:'numeric',month:'short',year:'numeric'});
+ selectPage('calendar');
+ scrollToTodayInYear();
+}
+$('#goToday').addEventListener('click',goToToday);
 $('#addEvent').addEventListener('click',()=>newEvent());$('#addRoutine').addEventListener('click',()=>newRoutine());$('#addArchive').addEventListener('click',()=>newArchive());
 $$('[data-close]').forEach(b=>b.addEventListener('click',()=>closeDialog(b.dataset.close)));
 $('#eventForm').addEventListener('submit',e=>{e.preventDefault();saveEvent(e.currentTarget)});
