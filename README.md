@@ -1,6 +1,6 @@
 # Atlas Organizer
 
-**Versão experimental:** 2.1.0-alpha.1 · GitHub Pages + Google Drive + Cloudflare Worker
+**Versão experimental:** 2.2.0-alpha.1 · GitHub Pages + Google Drive + Cloudflare Worker
 
 Aplicativo web de planejamento pessoal, rotinas recorrentes, acompanhamento de atividades e organização de materiais de estudo. A interface funciona como **PWA** em navegadores compatíveis, com dados locais para uso offline. Opcionalmente, conecta-se à conta Google para armazenar registros e anexos em uma área privada do Google Drive e enviar compromissos ao Google Agenda.
 
@@ -8,11 +8,24 @@ Esta versão aprimora **autenticação, persistência, sincronização e manuten
 
 > **Status:** código e testes de unidade preparados; **não publicado nem autorizado em conta Google real** pela entrega. Recomendado iniciar com registros de demonstração e manter backup da versão 2.0.2.
 
+## Atualizar da 2.1 para a 2.2 (recomendado para quem já configurou o Worker)
+
+**Não recrie o banco `atlas-auth`, não apague as tabelas D1 e não troque os segredos.** O formato do banco existente permanece compatível. Seus dados de atividades ficam no Drive/IndexedDB e não precisam ser migrados.
+
+1. **Faça backup:** no Atlas publicado, exporte um JSON em Configurações. Confirme também o status do Drive e guarde seus anexos originais. Não limpe dados do navegador.
+2. **Google Cloud:** no mesmo projeto e cliente OAuth Web já utilizados, ative **Google Calendar API** em `https://console.cloud.google.com/apis/library/calendar-json.googleapis.com` e confira em **Google Auth Platform → Data Access** o escopo `https://www.googleapis.com/auth/calendar.events` junto ao `drive.appdata`. **Não altere** os campos de origem JavaScript e URI de redirecionamento que já funcionam.
+3. **Worker existente:** Cloudflare → Compute → Workers & Pages → `atlas-organizer-api` → **Edit Code**; substitua todo o script pelo conteúdo de `backend/worker.mjs` **versão 2.2** e faça **Deploy**. Preserve o binding `DB` e todos os valores de **Variables and Secrets**. Verifique `https://atlas-organizer-api.menegattialvaro808.workers.dev/health` (retorno `2.2.0`).
+4. **Site no GitHub:** extraia `atlas-site-github-pages-2.2.zip` e envie seus **arquivos internos**, diretamente para a raiz do repositório `Alavario/atlas-organizer` (branch `main`), substituindo os arquivos existentes; faça **Commit changes** e aguarde **Actions** publicar. Não envie backups ou tokens. Reabra `https://alavario.github.io/atlas-organizer/` e atualize com `Ctrl + Shift + R`.
+5. **Conceda o escopo novo apenas uma vez:** Atlas → Configurações → **Google Agenda · sessão persistente** → **Autorizar Google Agenda**. Na janela Google, selecione a mesma conta e permita o acesso ao Agenda. O Drive e o Agenda continuarão compartilhando a mesma sessão. O botão de envio de cada atividade/encontro continua manual.
+6. **Valide:** cadastre uma atividade fictícia, salve, use **Enviar/atualizar atividade no Google Agenda** e confira o evento no Google Agenda. Feche/reabra o Atlas: a seção Agenda deve indicar conexão recuperada. Teste alterações offline somente depois de verificar **Offline pronto** no cabeçalho, lembrando que o envio ao Google exige internet.
+
+**Limites atuais:** não existe sincronização automática de *todas* as atividades do Atlas para o Google Agenda; o envio continua por atividade. A sincronização Drive conserva sua proteção contra conflitos; uma divergência entre cópias pode exigir escolha manual. A API de Agenda requer acesso à internet. O indicador offline reflete cache da interface, não o download de todos os anexos. No OAuth External/Testing, tokens de renovação podem expirar em sete dias e exigir nova autorização.
+
 ## Sumário
 
 1. [O que o Atlas faz](#o-que-o-atlas-faz)
 2. [Arquitetura e armazenamento](#arquitetura-e-armazenamento)
-3. [O que mudou na 2.1](#o-que-mudou-na-21)
+3. [O que mudou na 2.2](#o-que-mudou-na-22)
 4. [Arquivos](#arquivos)
 5. [Publicação sem instalar Node.js](#publicação-sem-instalar-nodejs)
 6. [Configurar Google OAuth](#configurar-google-oauth)
@@ -50,7 +63,7 @@ GitHub Pages (site/ — público, gratuito para repositório público elegível)
        ├── OAuth 2.0 authorization code + PKCE com Google
        ├── Limita acesso a uma conta Google configurada
        ├── Guarda refresh token criptografado (AES-GCM)
-       ├── Proxy restrito para a Google Drive API
+       ├── Proxy restrito para a Google Drive API e Google Calendar API
        └── Cloudflare D1 (somente sessões e credenciais criptografadas)
             │
             ▼
@@ -66,7 +79,7 @@ GitHub Pages (site/ — público, gratuito para repositório público elegível)
 | Atividades e rotinas locais | IndexedDB + backup de compatibilidade do navegador | Geralmente permanecem (exceto limpeza de dados) |
 | Anexos locais | IndexedDB | Permanecem neste dispositivo |
 | Cópia sincronizada de registros e anexos | Google Drive `appDataFolder` | Permanece na sua conta Google |
-| Client ID para Google Agenda legado | Preferências locais | Permanece no dispositivo |
+| Client ID para autenticação legada do Drive | Preferências locais | Permanece no dispositivo |
 | Token de sessão Atlas (revogável, ~30 dias renováveis) | IndexedDB no dispositivo | Permanece até expirar ou você desconectar/limpar dados |
 | Refresh token, Client Secret, credenciais Google | Cloudflare D1, com refresh/access criptografados usando chave secreta do Worker | **Nunca ficam no JavaScript do site, nem no GitHub** |
 | Banco D1 | Sessões, conta autorizada e metadados de autenticação | Não contém os registros de calendário/Acervo |
@@ -77,7 +90,7 @@ O Worker funciona sem cookies de terceiros; essa decisão evita bloqueios de coo
 
 A sessão local do Atlas expira depois de **30 dias sem atividade** (prazo renovável enquanto usada). Além disso, o Google pode revogar os tokens; contas Google em **OAuth External → Testing** com escopos do Drive normalmente recebem refresh tokens que expiram em **7 dias**, independentemente da duração da sessão Atlas. É uma regra do Google, não uma falha da renovação. Para uso prolongado, avalie o estado **In production**, possíveis avisos de aplicativo não verificado e os requisitos atualizados do Google, antes de modificar o consentimento.
 
-## O que mudou na 2.1
+## O que mudou na 2.2
 
 1. Implementação de um **Cloudflare Worker** para autenticação Google no modelo *authorization code* com PKCE e verificação do e-mail autorizado.
 2. Tokens de renovação **criptografados** no servidor, usando chave secreta não incluída no repositório.
@@ -86,7 +99,11 @@ A sessão local do Atlas expira depois de **30 dias sem atividade** (prazo renov
 5. **Retomada automática** da sessão ao reabrir o aplicativo com internet, sem o clique em “Retomar Drive” (se o consentimento Google e a sessão ainda estiverem válidos).
 6. Continuidade do **modo antigo**, sem Worker, caso a integração persistente ainda não esteja configurada.
 7. Atualização da versão do Service Worker e dos módulos para distribuição offline; interface e cores mantidas.
-8. Testes de API simulada, escopo do proxy, OAuth, criptografia, logout, armazenamento e conflitos.
+8. O **Google Agenda agora compartilha a sessão Google persistente do Drive**, sem guardar access token do Agenda no JavaScript.
+9. Worker oferece `/api/calendar-status` e proxy seguro `/api/calendar-proxy` para **eventos da agenda principal** (sem acesso genérico às APIs Google).
+10. Envio de uma atividade/ocorrência ao Agenda continua **manual**; reabertura do Atlas não requer autenticação separada quando os tokens permanecem válidos.
+11. Indicador no cabeçalho para diferenciar cache offline pronto de cache ainda não preparado.
+12. Testes simulados de escopos OAuth, proxy da Agenda, atualização de eventos, Drive, sessão, criptografia e conflitos.
 
 ## Arquivos
 
@@ -127,7 +144,7 @@ Na versão atual do Atlas, exporte os registros em Configurações → **Exporta
 
 1. Entre em `https://github.com/Alavario/atlas-organizer` (substitua caso tenha mudado o repositório).
 2. Mantenha **Settings → Pages → Deploy from branch → main → /(root)**.
-3. Extraia `atlas-site-github-pages-2.1.zip` (fornecido à parte).
+3. Extraia `atlas-site-github-pages-2.2.zip` (fornecido à parte).
 4. Envie **os arquivos de dentro** do ZIP diretamente para a raiz do repositório em **Add file → Upload files**, substituindo os existentes. Também haverá um `README.md` completo no pacote.
 5. Faça **Commit changes** e aguarde **Actions** finalizar a publicação.
 6. Abra `https://alavario.github.io/atlas-organizer/` e atualize forçadamente (`Ctrl + Shift + R`). Se ainda vir a versão anterior, feche as abas e abra novamente; o Service Worker pode precisar de uma segunda atualização.
@@ -143,10 +160,10 @@ Você já tem um projeto **Atlas Organizer** no Google Cloud. Pode aproveitar o 
 3. **Depois de criar o Worker e saber sua URL exata**, acrescente em **Authorized redirect URIs** este endereço completo:
    `https://NOME-DO-WORKER.SUBDOMINIO.workers.dev/auth/callback`
 4. Salve e copie o **Client ID** e o **Client Secret**. Guarde o Client Secret somente como segredo no Worker. **Nunca no GitHub nem nas configurações visíveis do Atlas.**
-5. Em **Data access / Scopes**, mantenha autorização para o escopo Google Drive `https://www.googleapis.com/auth/drive.appdata`. O login também usa os escopos básicos `openid` e `email` para confirmar a conta.
+5. Em **Data access / Scopes**, mantenha `https://www.googleapis.com/auth/drive.appdata` e adicione `https://www.googleapis.com/auth/calendar.events`. Habilite a **Google Calendar API** na Biblioteca de APIs. O login também usa `openid` e `email`.
 6. Em **Audience**, mantenha seu e-mail autorizado como usuário de teste enquanto o projeto estiver em modo de testes. A própria expiração de 7 dias continua se aplicando nesse estado para escopos do Drive.
 
-A integração com **Google Agenda** ainda usa a autorização temporária da interface existente (campos próprios em Configurações). Ela não foi incorporada ao Worker nesta etapa; eventos continuam podendo ser enviados individualmente quando a autorização estiver ativa.
+**Google Agenda a partir da 2.2:** utiliza o mesmo Worker e o mesmo login persistente do Drive. A nova autorização OAuth inclui `https://www.googleapis.com/auth/calendar.events` e o escopo `drive.appdata`. **Ative a Google Calendar API** na Biblioteca de APIs do projeto, acesse Google Auth Platform → **Data Access**, adicione o escopo `calendar.events` caso necessário e conceda a nova permissão uma vez. Não é necessário criar outro cliente OAuth, Worker ou banco D1. No botão "Autorizar Google Agenda" o Google pode mostrar a janela de consentimento novamente para ampliar as permissões.
 
 Documentação Google: [Authorization code (Web)](https://developers.google.com/identity/protocols/oauth2/web-server), [appDataFolder](https://developers.google.com/workspace/drive/api/guides/appdata), [modo de testes](https://support.google.com/cloud/answer/15549945).
 
@@ -205,7 +222,7 @@ Ambas devem permanecer corretamente cadastradas. O Google compara o redirect URI
 Abra `https://SEU-WORKER.SEUSUBDOMINIO.workers.dev/health` no navegador. O retorno esperado é similar a:
 
 ```json
-{"ok":true,"service":"atlas-auth-gateway","version":"2.1.0"}
+{"ok":true,"service":"atlas-auth-gateway","version":"2.2.0"}
 ```
 
 Este teste verifica a publicação do Worker, **não** garante que OAuth, D1 e Drive funcionem. Essas integrações precisam de um teste real adicional.
@@ -232,7 +249,7 @@ As atividades e rotinas continuam em IndexedDB, e o PWA pode abrir seus arquivos
 - O banco remoto continua sendo `atlas-organizer-data-v2.json` no Drive `appDataFolder`. Esta versão **não renomeia nem recria** automaticamente seus dados; continua lendo os registros da 2.0.2.
 - Os anexos já presentes no `appDataFolder` continuam acessíveis. Cópias locais precisam manter os blobs do IndexedDB; arquivos que nunca foram enviados ao Drive exigirão reenviar de seu dispositivo original.
 - O backup JSON exportado pelo app **não inclui anexos binários**. Não confunda com um backup integral dos materiais.
-- Migração recomendada: faça backup JSON → confira a cópia Drive na versão antiga → publique a 2.1 → conecte o Worker → confira a base remota → teste com atividade fictícia → só então utilize os dados reais.
+- Migração recomendada: faça backup JSON → confira a cópia Drive na versão antiga → publique a 2.2 → conecte o Worker → confira a base remota → teste com atividade fictícia → só então utilize os dados reais.
 - Não publique o arquivo de backup, os materiais ou o JSON do Drive no GitHub (o repositório do Pages é público).
 
 ## Segurança e privacidade
@@ -301,7 +318,7 @@ Os testes simulam:
 
 1. Adicionar testes de integração em um ambiente isolado do Google antes de migrar dados importantes.
 2. Sincronização por registro e política de mesclagem mais refinada que o JSON completo.
-3. Sessão persistente também para **Google Agenda** e opções avançadas de alarmes em dispositivos compatíveis.
+3. Sincronização configurável e em lote com **Google Agenda** e estudo de alarmes nativos em dispositivos compatíveis.
 4. Backups versionados e recuperação de anexos com relatório de integridade.
 5. Melhorias de segurança: rate limiting, monitoração do Worker, proteção de origem com domínio exclusivo, verificação/auditoria de dependências e estratégia de rotação da chave AES.
 6. Integração opcional de IA generativa para resumos, com autorização explícita e política clara de privacidade.

@@ -53,6 +53,17 @@ export class PersistentGateway {
  async logout(){
   try{if(this.session?.token)await this.api('/api/logout',{method:'POST'});}finally{this.session=null;await this.deleteSaved();}
  }
+ async calendarStatus(){
+  const response=await this.api('/api/calendar-status');
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok){const err=new Error(data.error||'Falha na verificação do Google Agenda.');err.code=data.code;throw err;}
+  return data;
+ }
+ async calendarFetch(url,opts={}){
+  const headers={};const ct=new Headers(opts.headers||{}).get('Content-Type');
+  if(ct)headers['Content-Type']=ct;
+  return this.api('/api/calendar-proxy?target='+encodeURIComponent(url),{method:opts.method||'GET',headers,body:opts.body??null});
+ }
  async driveFetch(url,opts={}){
   const headers={};const contentType=new Headers(opts.headers||{}).get('Content-Type');if(contentType)headers['Content-Type']=contentType;
   const method=opts.method||'GET';

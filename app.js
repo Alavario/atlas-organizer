@@ -1,5 +1,5 @@
-import {DriveStore, DRIVE_SCOPE} from './drive.js?v=2.1.0';
-import {PersistentGateway} from './backend-client.js?v=2.1.0';
+import {DriveStore, DRIVE_SCOPE} from './drive.js?v=2.2.0';
+import {PersistentGateway} from './backend-client.js?v=2.2.0';
 const $=(s)=>document.querySelector(s);
 const $$=(s)=>Array.from(document.querySelectorAll(s));
 const WEEK=['Domingo','Segunda-feira','Terça-feira','Quarta-feira','Quinta-feira','Sexta-feira','Sábado'];
@@ -369,55 +369,89 @@ $('#exportIcs').addEventListener('click',()=>{
  const content=buildIcs(year,$('#icsAlarm').checked),blob=new Blob([content],{type:'text/calendar;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`atlas-calendario-${year}.ics`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 });
 
+async function updateOfflineAvailability(){
+ const e=$('#offlineReady');if(!e)return;
+ if(!('serviceWorker' in navigator)||!('caches' in window)||!('indexedDB' in window)){
+  e.textContent='Offline não disponível';e.title='Este navegador não suporta todos os recursos offline.';return;
+ }
+ try{
+  await dbOpen();
+  const cached=await caches.match(new URL('./index.html',location.href).href);
+  if(!cached){e.textContent=navigator.onLine?'Preparando offline…':'Offline não preparado';e.title='Abra o Atlas com internet para armazenar a interface.';return;}
+  e.textContent=navigator.onLine?'Offline pronto':'Modo offline';
+  e.title='Interface disponível localmente. Dados salvos no IndexedDB; sincronização requer internet.';
+ }catch{e.textContent='Offline indisponível';e.title='Falha ao verificar o armazenamento local.';}
+}
 load();
+window.addEventListener('online',updateOfflineAvailability);
+window.addEventListener('offline',updateOfflineAvailability);
+window.addEventListener('load',()=>updateOfflineAvailability());
 if('serviceWorker' in navigator && /^https?:$/.test(location.protocol)){
- window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(err=>console.warn('Offline shell:',err)));
+ window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').then(()=>navigator.serviceWorker.ready).then(updateOfflineAvailability).catch(err=>{console.warn('Offline shell:',err);updateOfflineAvailability()}));
  window.addEventListener('load',()=>scriptOnce('https://accounts.google.com/gsi/client').catch(()=>{}));
 }
 
 
 
-// Sincronização direta com Google Agenda. OAuth do Google Identity Services: o token fica apenas na memória.
-let calendarToken=null;
+// Google Agenda usa a MESMA sessão persistente do Drive. Nunca há OAuth de Agenda separado no navegador.
 function calendarMessage(value){const el=$('#calendarStatus');if(el)el.textContent=value}
 function scriptOnce(url){return new Promise((resolve,reject)=>{if(window.google?.accounts?.oauth2)return resolve();let script=document.querySelector('script[data-google-gis]');if(script?.dataset.failed==='true'){script.remove();script=null;} if(script){script.addEventListener('load',resolve,{once:true});script.addEventListener('error',reject,{once:true});return;}script=document.createElement('script');script.dataset.googleGis='true';script.src=url;script.async=true;script.onload=resolve;script.onerror=()=>{script.dataset.failed='true';reject(new Error('Não foi possível carregar o Google Identity Services'));};document.head.append(script)})}
+async function readCalendarStatus(gw){
+ if(!navigator.onLine){calendarMessage('Offline · eventos salvos no Atlas aguardam envio ao Google Agenda.');return false;}
+ try{await gw.calendarStatus();calendarMessage('Google Agenda conectado pela sessão persistente · '+(gw.session?.email||''));return true;}
+ catch(err){calendarMessage(err.code==='calendar_scope_missing'?'Permissão do Agenda pendente. Clique em “Autorizar Google Agenda” uma única vez.':'Google Agenda: '+err.message);return false;}
+}
 async function connectCalendar(){
- const clientId=$('#googleClientId').value.trim();if(!clientId.endsWith('.apps.googleusercontent.com')){toast('Configure antes o ID do cliente OAuth Web.');return}
- storage.setItem('atlas.googleClientId',clientId);
- await scriptOnce('https://accounts.google.com/gsi/client');
- return new Promise((resolve,reject)=>{
-  const tokenClient=google.accounts.oauth2.initTokenClient({client_id:clientId,scope:'https://www.googleapis.com/auth/calendar.events',callback:response=>{
-   if(response.error)return reject(new Error(response.error));calendarToken=response.access_token;calendarMessage('Google Agenda autorizado nesta sessão.');resolve();
-  },error_callback:error=>reject(Error(error?.message||'Autorização cancelada'))});
-  tokenClient.requestAccessToken({prompt:'consent'});
- });
+ if(!navigator.onLine)throw Error('Conecte à internet para autorizar o Google Agenda.');
+ const candidate=gatewayFromSetting();
+ if(!candidate)throw Error('Configure primeiro o Cloudflare Worker em Conexão Google persistente.');
+ const gw=persistentGateway?.base===candidate.base?persistentGateway:candidate;
+ persistentGateway=gw;
+ // Sempre abre a janela DIRETAMENTE no clique, antes de qualquer await.
+ // Isso permite ampliar os escopos já concedidos, sem bloqueio de popup.
+ await gw.login();
+ const ok=await readCalendarStatus(gw);
+ if(!ok)throw Error('A autorização não incluiu o Google Agenda. Confira Data Access e a API no Google Cloud.');
+ gatewayMessage('Sessão Google persistente ativa · '+gw.session.email);
+ if(!driveConnection?.store)await establishDrive(authFromGateway(gw));
+ return gw;
+}
+async function calendarGatewayForSend(){
+ if(!navigator.onLine)throw Error('Sem internet. Salve os dados no Atlas e envie ao Agenda quando reconectar.');
+ const candidate=gatewayFromSetting();
+ if(!candidate)throw Error('Configure o Worker nas Configurações para usar o Agenda persistente.');
+ const gw=persistentGateway?.base===candidate.base?persistentGateway:candidate;
+ persistentGateway=gw;
+ // A autorização precisa ser iniciada por um clique explícito em Configurações.
+ if(!gw.session)throw Error('Abra Configurações e clique em “Autorizar Google Agenda” para conectar.');
+ return gw;
 }
 async function sendGoogleEvent(entry,refKey,links,reminder){
- if(!calendarToken)throw Error('Autorize o Google Agenda nas Configurações.');
+ const gw=await calendarGatewayForSend();
  const timeZone=Intl.DateTimeFormat().resolvedOptions().timeZone;
  const body={summary:entry.title||'Compromisso do Atlas',description:entry.description||'',start:{dateTime:new Date(entry.start).toISOString(),timeZone},end:{dateTime:new Date(entry.end).toISOString(),timeZone},reminders:reminder!==''&&reminder!==undefined?{useDefault:false,overrides:[{method:'popup',minutes:Number(reminder)}]}:{useDefault:true}};
- let eventId=links[refKey];const url='https://www.googleapis.com/calendar/v3/calendars/primary/events'+(eventId?'/'+encodeURIComponent(eventId):'');
- let response=await fetch(url,{method:eventId?'PUT':'POST',headers:{Authorization:'Bearer '+calendarToken,'Content-Type':'application/json'},body:JSON.stringify(body)});
- if(response.status===404&&eventId){eventId=null;response=await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events',{method:'POST',headers:{Authorization:'Bearer '+calendarToken,'Content-Type':'application/json'},body:JSON.stringify(body)})}
- if(!response.ok){const e=await response.json().catch(()=>({}));throw Error(`Google Agenda ${response.status}: ${e.error?.message||'verifique sua autorização'}`)}
+ let eventId=links[refKey];const root='https://www.googleapis.com/calendar/v3/calendars/primary/events';
+ const opts={method:eventId?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};
+ let response=await gw.calendarFetch(root+(eventId?'/'+encodeURIComponent(eventId):''),opts);
+ if(response.status===404&&eventId){eventId=null;response=await gw.calendarFetch(root,{...opts,method:'POST'});}
+ if(!response.ok){const e=await response.json().catch(()=>({}));throw Error(e.error?.message||`Google Agenda ${response.status}: verifique a conexão ou autorização.`)}
  const remote=await response.json();links[refKey]=remote.id;return remote;
 }
 async function syncEventOnCalendar(){
  const id=$('#eventForm').elements.id.value;const ev=state.db.events.find(x=>x.id===id);if(!ev)return toast('Salve a atividade antes de sincronizá-la.');
- try {if(!calendarToken)await connectCalendar();ev.calendarLinks||={};for(const sl of eventSlots(ev)){await sendGoogleEvent({...ev,start:sl.start,end:sl.end},sl.id,ev.calendarLinks,ev.reminderMinutes)}await save();calendarMessage(`Sincronizados ${eventSlots(ev).length} encontro(s) de “${ev.title}”.`);toast('Atividade enviada ao Google Agenda.')}catch(err){toast(err.message);calendarMessage('Erro: '+err.message);console.warn(err)}
+ try{const gw=await calendarGatewayForSend();await gw.calendarStatus();ev.calendarLinks||={};for(const sl of eventSlots(ev)){await sendGoogleEvent({...ev,start:sl.start,end:sl.end},sl.id,ev.calendarLinks,ev.reminderMinutes);await save();}calendarMessage(`Enviados ${eventSlots(ev).length} encontro(s) ao Google Agenda · sessão persistente.`);toast('Atividade enviada ao Google Agenda.')}catch(err){toast(err.message);calendarMessage('Erro: '+err.message);console.warn(err)}
 }
 async function syncOccurrenceOnCalendar(){
  const f=$('#occurrenceForm'),{id,anchor,slotId}=Object.fromEntries(new FormData(f));const r=state.db.routines.find(x=>x.id===id);if(!r)return toast('Rotina não encontrada.');
  const occ=occurrenceInstance(r,anchor,slotId);if(!occ)return toast('Encontro não encontrado.');
  const key=routineExceptionKey(id,anchor,slotId);const ex=state.db.exceptions[key]||{};
- try{if(!calendarToken)await connectCalendar();ex.calendarLinks||={};await sendGoogleEvent(occ,'single',ex.calendarLinks,ex.reminderMinutes??'');state.db.exceptions[key]=ex;await save();toast('Encontro enviado ao Google Agenda.')}catch(err){toast(err.message);calendarMessage('Erro: '+err.message);console.warn(err)}
+ try{const gw=await calendarGatewayForSend();await gw.calendarStatus();ex.calendarLinks||={};await sendGoogleEvent(occ,'single',ex.calendarLinks,ex.reminderMinutes??'');state.db.exceptions[key]=ex;await save();toast('Encontro enviado ao Google Agenda.')}catch(err){toast(err.message);calendarMessage('Erro: '+err.message);console.warn(err)}
 }
 $('#googleClientId').value=storage.getItem('atlas.googleClientId')||'';
-$('#connectCalendar').addEventListener('click',()=>connectCalendar().catch(err=>{calendarMessage('Erro: '+err.message);toast('Verifique configuração OAuth e conexão.')}));
-$('#disconnectCalendar').addEventListener('click',()=>{if(calendarToken&&window.google?.accounts?.oauth2){google.accounts.oauth2.revoke(calendarToken,()=>{})}calendarToken=null;calendarMessage('Sessão do Google Agenda desconectada.');});
+$('#connectCalendar').addEventListener('click',()=>connectCalendar().catch(err=>{calendarMessage('Erro: '+err.message);toast(err.message)}));
+$('#disconnectCalendar').addEventListener('click',()=>calendarMessage('O Drive e a Agenda compartilham uma única sessão. Para sair da conta, use “Desconectar” na seção Google Drive.'));
 $('#syncThisEvent').addEventListener('click',syncEventOnCalendar);
 $('#syncThisOccurrence').addEventListener('click',syncOccurrenceOnCalendar);
-
 
 // Google Drive appDataFolder — base privada para uma única pessoa, com confirmação de conflitos.
 let driveSyncing=false,driveRequested=false,driveTimer=null;
@@ -484,6 +518,7 @@ async function restoreGatewaySession(){
  if(!resumed){gatewayMessage('Nenhuma sessão ativa. Clique em Conectar para autorizar o Google.');return;}
  gatewayMessage('Sessão recuperada automaticamente · '+gw.session.email);
  await establishDrive(authFromGateway(gw));
+ readCalendarStatus(gw).catch(console.warn);
 }
 $('#atlasGatewayUrl').value=activeGatewayUrl();
 $('#saveGatewayUrl').addEventListener('click',async()=>{
@@ -494,7 +529,7 @@ $('#saveGatewayUrl').addEventListener('click',async()=>{
    if(!confirm('Trocar o backend desconectará a sessão anterior neste dispositivo. Continuar?'))return;
    driveConnection=null;await dbDelete('kv',GATEWAY_SESSION_KEY);
   }
-  storage.setItem(GATEWAY_URL_KEY,gw.base);persistentGateway=gw;
+  storage.setItem(GATEWAY_URL_KEY,gw.base);persistentGateway=gw;calendarMessage('Backend configurado. Autorize o Google Agenda usando a mesma sessão do Drive.');
   gatewayMessage('Worker configurado. Clique em “Conectar / Retomar Drive” para autorizar.');toast('Endereço do backend salvo.');
  }catch(err){gatewayMessage(err.message)}
 });
@@ -556,6 +591,7 @@ async function connectDrive(){
    if(!gw.session)await gw.login();
    gatewayMessage('Sessão persistente ativa · '+gw.session.email);
    await establishDrive(authFromGateway(gw));
+   readCalendarStatus(gw).catch(console.warn);
   }else{
    const auth=await requestDriveToken();await establishDrive(auth);
   }
@@ -599,7 +635,7 @@ async function disconnectDrive(){
   gatewayMessage('Identificador da sessão removido deste dispositivo.');
  }
  if(old?.token&&window.google?.accounts?.oauth2)google.accounts.oauth2.revoke(old.token,()=>{});
- showDriveChoices(false);syncStatus('Desconectado. Registros continuam disponíveis neste dispositivo.');
+ showDriveChoices(false);calendarMessage('Google Agenda desconectado: a sessão compartilhada foi encerrada.');syncStatus('Desconectado. Registros continuam disponíveis neste dispositivo.');
 }
 $('#connectDrive').addEventListener('click',connectDrive);
 $('#quickConnectDrive').addEventListener('click',connectDrive);
