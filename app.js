@@ -1,4 +1,5 @@
-import {DriveStore, DRIVE_SCOPE} from './drive.js?v=2.0.1';
+import {DriveStore, DRIVE_SCOPE} from './drive.js?v=2.1.0';
+import {PersistentGateway} from './backend-client.js?v=2.1.0';
 const $=(s)=>document.querySelector(s);
 const $$=(s)=>Array.from(document.querySelectorAll(s));
 const WEEK=['Domingo','Segunda-feira','Terça-feira','Quarta-feira','Quinta-feira','Sexta-feira','Sábado'];
@@ -6,7 +7,7 @@ const SHORT=['dom','seg','ter','qua','qui','sex','sáb'];
 const MONTHS=['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 const BASE={version:1,events:[],routines:[],archive:[],exceptions:{}};
 const DEFAULTS={themeLight:'medium',themeHue:'blue',edgeNavigate:true,soundOn:false,vibrationOn:false,largeText:false,highContrast:false,reduceMotion:false,latitude:'',longitude:''};
-const storage=(()=>{try{return window.localStorage}catch{return {getItem:()=>null,setItem:()=>{}}}})();
+const storage=(()=>{try{return window.localStorage}catch{return {getItem:()=>null,setItem:()=>{},removeItem:()=>{}}}})();
 const settings={...DEFAULTS,...JSON.parse(storage.getItem('atlas.settings')||'{}')};
 // Migration: version 1.4 offered three combined presets.
 if(settings.theme&&!('themeLight' in JSON.parse(storage.getItem('atlas.settings')||'{}'))){settings.themeLight=settings.theme==='light'?'light':settings.theme==='dark'?'dark':'medium';settings.themeHue='blue';}
@@ -48,6 +49,33 @@ async function dbValue(store,key,value,write=false){const db=await dbOpen();retu
 });}
 async function dbDelete(store,key){const db=await dbOpen();return new Promise((resolve,reject)=>{const tx=db.transaction(store,'readwrite');const req=tx.objectStore(store).delete(key);req.onsuccess=()=>resolve();req.onerror=()=>reject(req.error)})}
 let driveConnection=null;
+let persistentGateway=null;
+const GATEWAY_URL_KEY='atlas.gatewayUrl';
+const GATEWAY_SESSION_KEY='atlas-backend-session';
+const activeGatewayUrl=()=>storage.getItem(GATEWAY_URL_KEY)?.trim()||'';
+function gatewayFromSetting(){
+ const addr=$('#atlasGatewayUrl')?.value.trim()||activeGatewayUrl();
+ if(!addr)return null;
+ return new PersistentGateway(addr,()=>dbValue('kv',GATEWAY_SESSION_KEY),session=>dbValue('kv',GATEWAY_SESSION_KEY,session,true),()=>dbDelete('kv',GATEWAY_SESSION_KEY));
+}
+function gatewayMessage(msg){const e=$('#atlasGatewayStatus');if(e)e.textContent=msg;}
+const DRIVE_REMEMBER_KEY='atlas.drivePreviouslyAuthorized';
+const driveWasAuthorized=()=>storage.getItem(DRIVE_REMEMBER_KEY)==='1';
+function rememberDrive(){storage.setItem(DRIVE_REMEMBER_KEY,'1');updateDriveReconnectUI();}
+function updateDriveReconnectUI(){
+ const button=$('#quickConnectDrive');if(!button)return;
+ // A indicação de conexão só representa uma autorização que está de fato ativa.
+ button.classList.toggle('hidden',!driveWasAuthorized()||!!driveConnection?.store);
+ button.disabled=false;
+}
+function restoreDrivePrompt(){
+ updateDriveReconnectUI();
+ if(driveWasAuthorized()&&!driveConnection){
+  syncStatus(navigator.onLine
+    ?'O Google Drive foi configurado anteriormente. Retome a conexão com um clique para sincronizar. Os registros locais estão preservados.'
+    :'Offline · registros salvos neste dispositivo; retome a conexão ao voltar a internet.');
+ }
+}
 let localChangeVersion=0;
 function syncStatus(message){const el=$('#cloudStatus');if(el)el.textContent=message}
 
@@ -59,7 +87,8 @@ async function load(){
  state.ready=false;
  $('#saveState').textContent=source==='novo'?'Armazenamento local pronto':`Carregado: ${source}`;
  renderAll();
- // A sincronização exige consentimento explícito e configuração individual.
+ restoreDrivePrompt();
+ if(activeGatewayUrl())restoreGatewaySession().catch(err=>gatewayMessage('Reconexão adiada: '+err.message));
 }
 function validData(db){return db&&Array.isArray(db.events)&&Array.isArray(db.routines)&&Array.isArray(db.archive)&&db.exceptions&&typeof db.exceptions==='object'}
 let saveChain=Promise.resolve(),pendingWrites=0;
@@ -69,7 +98,7 @@ function save(){
  saveChain=saveChain.catch(()=>{}).then(async()=>{
   try{await dbValue('kv','atlas-data',snapshot,true)}catch(err){console.error(err);toast('Falha no armazenamento persistente; exporte um backup JSON.');throw err}
   if(driveConnection?.active && !driveConnection.blocked) scheduleDriveSync();
- }).finally(()=>{pendingWrites--;if(!pendingWrites)$('#saveState').textContent='Salvo neste dispositivo'+(driveConnection?.active?' · Drive conectado':'')});
+ }).finally(()=>{pendingWrites--;if(!pendingWrites)$('#saveState').textContent='Salvo neste dispositivo'+(driveConnection?.active?' · Drive conectado':driveWasAuthorized()?' · Drive precisa ser retomado':'')});
  return saveChain;
 }
 window.addEventListener('beforeunload',e=>{if(pendingWrites){e.preventDefault();e.returnValue=''}});
@@ -414,7 +443,13 @@ async function runDriveSync(){
    if(fingerprint===conn.lastSyncedHash){
      try{const assets=await conn.store.uploadAttachments(snapshot,id=>dbValue('attachments',id));
        syncStatus(assets.missing?`Banco atualizado · ${assets.missing} anexo(s) ainda indisponíveis.`:'Google Drive atualizado · dados e anexos conferidos.');
-     }catch(err){syncStatus('Banco atualizado; falha ao conferir anexos: '+err.message)}
+     }catch(err){
+       if(/autoriza[cç][aã]o do Google expirou|401/.test(err.message)){
+         driveConnection=null;driveRequested=false;showDriveChoices(false);updateDriveReconnectUI();
+         syncStatus('A autorização do Drive expirou. Clique em Retomar Drive para continuar.');break;
+       }
+       syncStatus('Banco atualizado; falha ao conferir anexos: '+err.message);
+     }
      continue;}
    syncStatus('Enviando registros e anexos ao Google Drive…');
    try {
@@ -425,12 +460,44 @@ async function runDriveSync(){
     else syncStatus('Google Drive atualizado · versão '+result.revision+'.');
     if(await dataFingerprint(state.db)!==fingerprint)driveRequested=true;
    }catch(err){
-    console.warn('Sincronização Drive:',err);conn.blocked=true;driveRequested=false;showDriveChoices(true);
-    syncStatus('Envio suspenso: '+err.message+' Seus dados locais foram preservados.');break;
+    console.warn('Sincronização Drive:',err);driveRequested=false;
+    if(/autoriza[cç][aã]o do Google expirou|401/.test(err.message)){
+      driveConnection=null;showDriveChoices(false);updateDriveReconnectUI();
+      syncStatus('A sessão do Google expirou. Clique em Retomar Drive para continuar. Suas atividades estão salvas localmente.');
+    }else{
+      conn.blocked=true;showDriveChoices(true);
+      syncStatus('Envio suspenso: '+err.message+' Seus dados locais foram preservados.');
+    }
+    break;
    }
   }
  }finally{driveSyncing=false;}
 }
+// Backend permanente: o navegador guarda apenas uma sessão do Atlas; o Worker
+// guarda o refresh token criptografado e faz as requisições ao Drive.
+function authFromGateway(gateway){return {store:new DriveStore('via-backend',(url,opts)=>gateway.driveFetch(url,opts)),token:null,gateway};}
+async function restoreGatewaySession(){
+ if(!navigator.onLine){gatewayMessage('Offline · a sessão será retomada quando houver internet.');return;}
+ const gw=gatewayFromSetting();if(!gw)return;
+ persistentGateway=gw;gatewayMessage('Verificando a sessão persistente…');
+ const resumed=await gw.resume();
+ if(!resumed){gatewayMessage('Nenhuma sessão ativa. Clique em Conectar para autorizar o Google.');return;}
+ gatewayMessage('Sessão recuperada automaticamente · '+gw.session.email);
+ await establishDrive(authFromGateway(gw));
+}
+$('#atlasGatewayUrl').value=activeGatewayUrl();
+$('#saveGatewayUrl').addEventListener('click',async()=>{
+ try{
+  const gw=gatewayFromSetting();if(!gw)throw Error('Informe o endereço do Cloudflare Worker.');
+  const old=activeGatewayUrl();
+  if(old&&new URL(old).origin!==gw.base){
+   if(!confirm('Trocar o backend desconectará a sessão anterior neste dispositivo. Continuar?'))return;
+   driveConnection=null;await dbDelete('kv',GATEWAY_SESSION_KEY);
+  }
+  storage.setItem(GATEWAY_URL_KEY,gw.base);persistentGateway=gw;
+  gatewayMessage('Worker configurado. Clique em “Conectar / Retomar Drive” para autorizar.');toast('Endereço do backend salvo.');
+ }catch(err){gatewayMessage(err.message)}
+});
 async function requestDriveToken(){
  const clientId=$('#googleClientId').value.trim();
  if(!clientId.endsWith('.apps.googleusercontent.com'))throw Error('Informe primeiro o ID OAuth Web no campo de Google Agenda.');
@@ -441,20 +508,22 @@ async function requestDriveToken(){
    if(reply.error||!reply.access_token)reject(Error(reply.error||'Autorização não concedida'));
    else resolve({store:new DriveStore(reply.access_token),token:reply.access_token});
   },error_callback:err=>reject(Error(err?.message||'Janela de autorização cancelada.'))});
-  client.requestAccessToken({prompt:'consent'});
+  // Evita solicitar novamente o consentimento já concedido. O clique continua necessário por segurança.
+  client.requestAccessToken({prompt:''});
  });
 }
 function counts(db){return (db?.events?.length||0)+(db?.routines?.length||0)+(db?.archive?.length||0)+Object.keys(db?.exceptions||{}).length}
-async function connectDrive(){
- if(!navigator.onLine){syncStatus('Sem internet. Conecte-se antes de autorizar o Drive.');return;}
- $('#connectDrive').disabled=true;syncStatus('Solicitando autorização do Google…');
+async function establishDrive(auth){
+ $('#connectDrive').disabled=true;
+ $('#quickConnectDrive').disabled=true;
  try{
-  const auth=await requestDriveToken();const store=auth.store;
+  const store=auth.store;
   syncStatus('Lendo a cópia privada no Drive…');
   const remote=await store.read();
+  rememberDrive();
   const localHash=await dataFingerprint(state.db),remoteHash=remote?await dataFingerprint(remote.data):null;
   const meta=await dbValue('kv','atlas-drive-meta').catch(()=>null);
-  driveConnection={store,token:auth.token,lastSyncedHash:null,active:false,blocked:true};
+  driveConnection={store,token:auth.token,gateway:auth.gateway||null,lastSyncedHash:null,active:false,blocked:true};
   if(remoteHash===localHash){
     driveConnection.lastSyncedHash=localHash;driveConnection.active=true;driveConnection.blocked=false;
     await dbValue('kv','atlas-drive-meta',{syncedHash:localHash,revision:store.revision},true);
@@ -472,7 +541,25 @@ async function connectDrive(){
     showDriveChoices(true);
     syncStatus(remote?`Drive: ${remoteCount} registro(s) · dispositivo: ${localCount}. Escolha uma das cópias antes de sincronizar.`:`Drive vazio · ${localCount} registro(s) locais. Clique “Enviar cópia deste dispositivo” para criar o banco remoto.`);
   }
- }catch(err){syncStatus('Não conectado: '+err.message);console.warn(err)}finally{$('#connectDrive').disabled=false}
+ }catch(err){syncStatus('Não conectado: '+err.message);console.warn(err)}
+ finally{$('#connectDrive').disabled=false;updateDriveReconnectUI()}
+}
+async function connectDrive(){
+ if(!navigator.onLine){syncStatus('Sem internet. Os registros continuam disponíveis neste dispositivo.');return;}
+ syncStatus('Solicitando autorização Google…');
+ try{
+  if(activeGatewayUrl()){
+   // Abra a janela OAuth antes de qualquer await: bloqueadores de pop-up exigem gesto do usuário.
+   const candidate=gatewayFromSetting();
+   const gw=persistentGateway?.session && persistentGateway.base===candidate.base?persistentGateway:candidate;
+   persistentGateway=gw;
+   if(!gw.session)await gw.login();
+   gatewayMessage('Sessão persistente ativa · '+gw.session.email);
+   await establishDrive(authFromGateway(gw));
+  }else{
+   const auth=await requestDriveToken();await establishDrive(auth);
+  }
+ }catch(err){syncStatus('Não conectado: '+err.message);gatewayMessage(err.message)}
 }
 async function loadDriveCopy(){
  if(!driveConnection?.store)return toast('Conecte ao Google Drive primeiro.');
@@ -502,10 +589,20 @@ async function sendDriveCopy(){
 }
 async function disconnectDrive(){
  const old=driveConnection;driveConnection=null;driveRequested=false;clearTimeout(driveTimer);
+ storage.removeItem(DRIVE_REMEMBER_KEY);
+ updateDriveReconnectUI();
+ const gateway=old?.gateway||persistentGateway;
+ if(gateway?.session){
+  try{await gateway.logout();gatewayMessage('Sessão encerrada neste dispositivo.')}catch(err){gatewayMessage('Sessão local apagada; revogação remota pode estar pendente: '+err.message)}
+ }else if(activeGatewayUrl()){
+  await dbDelete('kv',GATEWAY_SESSION_KEY).catch(console.warn);
+  gatewayMessage('Identificador da sessão removido deste dispositivo.');
+ }
  if(old?.token&&window.google?.accounts?.oauth2)google.accounts.oauth2.revoke(old.token,()=>{});
  showDriveChoices(false);syncStatus('Desconectado. Registros continuam disponíveis neste dispositivo.');
 }
 $('#connectDrive').addEventListener('click',connectDrive);
+$('#quickConnectDrive').addEventListener('click',connectDrive);
 $('#disconnectDrive').addEventListener('click',disconnectDrive);
 $('#loadDriveCopy').addEventListener('click',loadDriveCopy);
 $('#sendDriveCopy').addEventListener('click',sendDriveCopy);
@@ -514,5 +611,5 @@ $('#syncDriveNow').addEventListener('click',()=>{
  if(driveConnection.blocked)return toast('Escolha entre a cópia local e a do Drive antes de sincronizar.');
  driveRequested=true;runDriveSync().catch(console.warn);
 });
-window.addEventListener('online',()=>{if(driveConnection?.active&&!driveConnection.blocked){syncStatus('Internet restaurada · retomando sincronização…');driveRequested=true;runDriveSync().catch(console.warn)}});
+window.addEventListener('online',()=>{if(driveConnection?.active&&!driveConnection.blocked){syncStatus('Internet restaurada · retomando sincronização…');driveRequested=true;runDriveSync().catch(console.warn)}else if(activeGatewayUrl()&&!driveConnection?.store){restoreGatewaySession().catch(err=>gatewayMessage('Não foi possível recuperar a sessão: '+err.message))}});
 window.addEventListener('offline',()=>{if(driveConnection)syncStatus('Offline · as alterações serão guardadas neste dispositivo.')});
