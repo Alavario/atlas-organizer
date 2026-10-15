@@ -1,5 +1,5 @@
 // Service worker: somente a interface estática é armazenada em cache.
-const CACHE='atlas-static-2-github-drive-1';
+const CACHE='atlas-static-2-github-drive-2';
 const SHELL=['./','./index.html','./app.js','./styles.css','./drive.js','./manifest.webmanifest','./icon.svg'];
 self.addEventListener('install',ev=>{ev.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL)));self.skipWaiting()});
 self.addEventListener('activate',ev=>{ev.waitUntil((async()=>{for(const name of await caches.keys()){if(name.startsWith('atlas-static-')&&name!==CACHE)await caches.delete(name)}await self.clients.claim()})())});

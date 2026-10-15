@@ -10,7 +10,7 @@ const DATA_FILENAME='atlas-organizer-data-v2.json';
 const ASSET_PREFIX='atlas-attachment-';
 export class DriveConflict extends Error { constructor(){super('A cópia no Drive foi alterada desde a última leitura. Compare as versões antes de enviar.');this.name='DriveConflict';} }
 export class DriveStore {
- constructor(token, fetchImpl=fetch){this.token=token;this.fetchImpl=fetchImpl;this.fileId=null;this.revision=0;this.remote=null;this.files=null;}
+ constructor(token, fetchImpl=(...args)=>globalThis.fetch(...args)){this.token=token;this.fetchImpl=fetchImpl;this.fileId=null;this.revision=0;this.remote=null;this.files=null;}
  async request(url,opts={}){
   if(!navigator.onLine)throw new Error('Sem internet: os dados continuam salvos neste dispositivo.');
   const res=await this.fetchImpl(url,{...opts,headers:{Authorization:`Bearer ${this.token}`,...opts.headers}});
